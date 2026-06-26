@@ -3,34 +3,23 @@ import path from "node:path";
 import matter from "gray-matter";
 import Fuse from "fuse.js";
 
-/**
- * VAULT STRUCTURE (Obsidian-compatible):
- *
- *   vault/
- *     flux-project.md
- *     personal-context.md
- *     preferences.md
- *
- * Each file = one "topic". Inside a topic file, entries are appended as
- * dated sections under a markdown heading, e.g.:
- *
- *   ---
- *   tags: [flux, backend]
- *   updated: 2026-06-26
- *   ---
- *
- *   ## 2026-06-26T10:32:00Z
- *   Decided to use Redis TTL expiry instead of proactive cache deletion
- *   for RBAC role changes, to avoid extra write load.
- *
- *   ## 2026-06-21T08:10:00Z
- *   Render free tier is the only viable no-cost backend host; mitigation
- *   is a keep-warm ping every 10-14 minutes.
- *
- * Because it's just plain .md files with YAML frontmatter, you can open
- * the same VAULT_DIR folder directly in Obsidian to browse/edit visually.
- */
+// ─── Mode detection ───────────────────────────────────────────────────────────
+const MONGODB_URI = process.env.MONGODB_URI || null;
+let _col = null;
 
+async function getCollection() {
+  if (_col) return _col;
+  const { MongoClient } = await import("mongodb");
+  const client = new MongoClient(MONGODB_URI);
+  await client.connect();
+  const db = client.db("memory-vault");
+  _col = db.collection("memories");
+  await _col.createIndex({ topic: 1 });
+  await _col.createIndex({ createdAt: 1 });
+  return _col;
+}
+
+// ─── File mode (local / Obsidian-compatible) ──────────────────────────────────
 const VAULT_DIR = process.env.VAULT_DIR
   ? path.resolve(process.env.VAULT_DIR)
   : path.resolve(process.cwd(), "vault");
@@ -71,39 +60,56 @@ function writeTopicFile(topic, parsed) {
   return filePath;
 }
 
-/**
- * Append a new dated entry to a topic file. Creates the file if needed.
- */
-export function saveMemory({ topic = "general", content, tags = [] }) {
-  if (!content || !content.trim()) {
-    throw new Error("content is required to save a memory.");
-  }
-  ensureVaultDir();
-  const parsed = readTopicFile(topic);
+// ─── Unified API ──────────────────────────────────────────────────────────────
+
+export async function saveMemory({ topic = "general", content, tags = [] }) {
+  if (!content || !content.trim()) throw new Error("content is required.");
   const timestamp = new Date().toISOString();
 
+  if (MONGODB_URI) {
+    const c = await getCollection();
+    await c.insertOne({
+      topic: sanitizeTopic(topic),
+      content: content.trim(),
+      tags,
+      createdAt: new Date(),
+    });
+    return { topic: sanitizeTopic(topic), timestamp };
+  }
+
+  // File mode
+  ensureVaultDir();
+  const parsed = readTopicFile(topic);
   const existingTags = new Set(parsed.data.tags || []);
   for (const t of tags) existingTags.add(t);
-
   parsed.data.tags = Array.from(existingTags);
   parsed.data.updated = timestamp;
-
-  const entryHeading = `## ${timestamp}`;
-  parsed.content = `${parsed.content.trim()}\n\n${entryHeading}\n${content.trim()}\n`.trim();
-
+  parsed.content = `${parsed.content.trim()}\n\n## ${timestamp}\n${content.trim()}\n`.trim();
   const filePath = writeTopicFile(topic, parsed);
   return { topic: sanitizeTopic(topic), filePath, timestamp };
 }
 
-/**
- * Return the full contents (frontmatter + entries) of one topic.
- */
-export function getMemory({ topic }) {
+export async function getMemory({ topic }) {
   if (!topic) throw new Error("topic is required.");
-  const parsed = readTopicFile(topic);
-  if (!parsed.content) {
-    return { topic: sanitizeTopic(topic), found: false, tags: [], entries: [] };
+
+  if (MONGODB_URI) {
+    const c = await getCollection();
+    const docs = await c.find({ topic: sanitizeTopic(topic) }).sort({ createdAt: 1 }).toArray();
+    if (!docs.length) return { topic: sanitizeTopic(topic), found: false, entries: [] };
+    return {
+      topic: sanitizeTopic(topic),
+      found: true,
+      entries: docs.map((d) => ({
+        timestamp: d.createdAt.toISOString(),
+        content: d.content,
+        tags: d.tags,
+      })),
+    };
   }
+
+  // File mode
+  const parsed = readTopicFile(topic);
+  if (!parsed.content) return { topic: sanitizeTopic(topic), found: false, tags: [], entries: [] };
   return {
     topic: sanitizeTopic(topic),
     found: true,
@@ -113,32 +119,56 @@ export function getMemory({ topic }) {
   };
 }
 
-/**
- * List every topic currently in the vault, with tags + last-updated.
- */
-export function listMemories() {
+export async function listMemories() {
+  if (MONGODB_URI) {
+    const c = await getCollection();
+    const topics = await c.distinct("topic");
+    // Get latest entry per topic for the updated timestamp
+    const result = await Promise.all(
+      topics.map(async (t) => {
+        const latest = await c.findOne({ topic: t }, { sort: { createdAt: -1 } });
+        return { topic: t, tags: latest?.tags || [], updated: latest?.createdAt?.toISOString() || null };
+      })
+    );
+    return result;
+  }
+
+  // File mode
   ensureVaultDir();
   const files = fs.readdirSync(VAULT_DIR).filter((f) => f.endsWith(".md"));
   return files.map((file) => {
     const topic = file.replace(/\.md$/, "");
     const parsed = readTopicFile(topic);
-    return {
-      topic,
-      tags: parsed.data.tags || [],
-      updated: parsed.data.updated || null,
-    };
+    return { topic, tags: parsed.data.tags || [], updated: parsed.data.updated || null };
   });
 }
 
-/**
- * Search across all topics. Splits each topic file into individual
- * "## timestamp" entries and fuzzy-searches across them, so results are
- * specific snippets rather than whole files.
- */
-export function searchMemory({ query, topic = null, limit = 8 }) {
+export async function searchMemory({ query, topic = null, limit = 8 }) {
+  if (MONGODB_URI) {
+    const c = await getCollection();
+    const filter = topic ? { topic: sanitizeTopic(topic) } : {};
+    const all = await c.find(filter).toArray();
+    if (!query || !query.trim()) return all.slice(0, limit).map((d) => ({
+      topic: d.topic, timestamp: d.createdAt.toISOString(), text: d.content, tags: d.tags,
+    }));
+    const fuse = new Fuse(all, {
+      keys: ["content", "topic", "tags"],
+      includeScore: true,
+      threshold: 0.6,
+      ignoreLocation: true,
+    });
+    return fuse.search(query).slice(0, limit).map((r) => ({
+      topic: r.item.topic,
+      timestamp: r.item.createdAt.toISOString(),
+      text: r.item.content,
+      tags: r.item.tags,
+      score: r.score,
+    }));
+  }
+
+  // File mode
   ensureVaultDir();
-  const files = fs
-    .readdirSync(VAULT_DIR)
+  const files = fs.readdirSync(VAULT_DIR)
     .filter((f) => f.endsWith(".md"))
     .filter((f) => !topic || f === `${sanitizeTopic(topic)}.md`);
 
@@ -146,43 +176,33 @@ export function searchMemory({ query, topic = null, limit = 8 }) {
   for (const file of files) {
     const t = file.replace(/\.md$/, "");
     const parsed = readTopicFile(t);
-    const sections = parsed.content
-      .split(/^## /m)
-      .map((s) => s.trim())
-      .filter(Boolean);
-
+    const sections = parsed.content.split(/^## /m).map((s) => s.trim()).filter(Boolean);
     for (const section of sections) {
       const [tsLine, ...rest] = section.split("\n");
-      corpus.push({
-        topic: t,
-        timestamp: tsLine?.trim() || null,
-        text: rest.join("\n").trim() || tsLine,
-      });
+      corpus.push({ topic: t, timestamp: tsLine?.trim() || null, text: rest.join("\n").trim() || tsLine });
     }
   }
 
-  if (!query || !query.trim()) {
-    return corpus.slice(0, limit);
-  }
-
+  if (!query || !query.trim()) return corpus.slice(0, limit);
   const fuse = new Fuse(corpus, {
     keys: ["text", "topic"],
     includeScore: true,
-    threshold: 0.6, // higher = more lenient fuzzy matching
-    ignoreLocation: true, // match anywhere in the text, not just near the start
+    threshold: 0.6,
+    ignoreLocation: true,
   });
-
-  return fuse
-    .search(query)
-    .slice(0, limit)
-    .map((r) => ({ ...r.item, score: r.score }));
+  return fuse.search(query).slice(0, limit).map((r) => ({ ...r.item, score: r.score }));
 }
 
-/**
- * Delete an entire topic file. Use sparingly — this is destructive.
- */
-export function deleteTopic({ topic }) {
+export async function deleteTopic({ topic }) {
   if (!topic) throw new Error("topic is required.");
+
+  if (MONGODB_URI) {
+    const c = await getCollection();
+    const result = await c.deleteMany({ topic: sanitizeTopic(topic) });
+    return { topic: sanitizeTopic(topic), deleted: result.deletedCount > 0 };
+  }
+
+  // File mode
   const filePath = topicFilePath(topic);
   if (fs.existsSync(filePath)) {
     fs.unlinkSync(filePath);
