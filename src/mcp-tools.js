@@ -34,7 +34,8 @@ export function registerMemoryTools(server) {
         .optional(),
     },
     async ({ topic, content, tags }) => {
-      const result = saveMemory({ topic, content, tags });
+      // FIX: Added await because database write operations are asynchronous
+      const result = await saveMemory({ topic, content, tags });
       return {
         content: [
           {
@@ -54,7 +55,8 @@ export function registerMemoryTools(server) {
       topic: z.string().describe("The topic to retrieve, e.g. 'flux-project'."),
     },
     async ({ topic }) => {
-      const result = getMemory({ topic });
+      // FIX: Added await to cleanly resolve the async read operation
+      const result = await getMemory({ topic });
       if (!result.found) {
         return {
           content: [
@@ -62,11 +64,17 @@ export function registerMemoryTools(server) {
           ],
         };
       }
+
+      // Format response based on backend source mode (MongoDB entries array vs local raw file string)
+      const outputText = result.raw 
+        ? result.raw 
+        : result.entries.map((d) => `[${d.timestamp}] ${d.content}`).join("\n");
+
       return {
         content: [
           {
             type: "text",
-            text: `Topic: ${result.topic}\nTags: ${result.tags.join(", ") || "none"}\nLast updated: ${result.updated}\n\n${result.raw}`,
+            text: `Topic: ${result.topic}\nTags: ${(result.tags || []).join(", ") || "none"}\n\n${outputText}`,
           },
         ],
       };
@@ -91,7 +99,8 @@ export function registerMemoryTools(server) {
         .optional(),
     },
     async ({ query, topic, limit }) => {
-      const results = searchMemory({ query, topic, limit });
+      // FIX: Added await to fetch search results from matching datasets
+      const results = await searchMemory({ query, topic, limit });
       if (!results.length) {
         return { content: [{ type: "text", text: "No matching memories found." }] };
       }
@@ -111,14 +120,15 @@ export function registerMemoryTools(server) {
       "Use this to get an overview before deciding what to search or retrieve.",
     {},
     async () => {
-      const topics = listMemories();
+      // FIX: Added await to pull full array indices
+      const topics = await listMemories();
       if (!topics.length) {
         return { content: [{ type: "text", text: "The vault is currently empty." }] };
       }
       const formatted = topics
         .map(
           (t) =>
-            `- ${t.topic} (tags: ${t.tags.join(", ") || "none"}, updated: ${t.updated || "never"})`
+            `- ${t.topic} (tags: ${(t.tags || []).join(", ") || "none"}, updated: ${t.updated || "never"})`
         )
         .join("\n");
       return { content: [{ type: "text", text: formatted }] };
@@ -133,7 +143,8 @@ export function registerMemoryTools(server) {
       topic: z.string().describe("The topic to delete entirely."),
     },
     async ({ topic }) => {
-      const result = deleteTopic({ topic });
+      // FIX: Added await to process mutations
+      const result = await deleteTopic({ topic });
       return {
         content: [
           {

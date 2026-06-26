@@ -4,7 +4,11 @@
   "description": "A self-hosted, Obsidian-compatible markdown memory vault exposed as an MCP server, so any MCP-aware Claude account (or client) reads/writes the same persistent context.",
   "type": "module",
   "main": "src/http-server.js",
+  "bin": {
+  "memory-vault-setup": "./bin/setup.cjs"
+},
   "scripts": {
+    "setup": "node bin/setup.cjs",
     "start:local": "node src/stdio-server.js",
     "start:server": "node src/http-server.js",
     "test:vault": "node src/test-vault.js"
