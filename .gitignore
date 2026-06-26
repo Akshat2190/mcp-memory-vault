@@ -6,3 +6,4 @@ npm-debug.log*
 # want your memories in git history. Comment this out if you DO want
 # git-versioned memory (recommended -- it's basically free undo history).
 # vault/*.md
+vault/*.md
