@@ -16,7 +16,7 @@ app.use(express.json());
 // connector — set MCP_SHARED_SECRET here and the same value there.
 function requireAuth(req, res, next) {
   if (!SHARED_SECRET) return next(); // no secret set = auth disabled (local/dev only)
-  const provided = req.header("x-mcp-secret");
+  const provided = req.header("x-mcp-secret") || req.query.secret;
   if (provided !== SHARED_SECRET) {
     return res.status(401).json({ error: "Unauthorized" });
   }
