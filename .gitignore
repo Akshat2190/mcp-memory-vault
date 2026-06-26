@@ -1,0 +1,8 @@
+node_modules/
+.env
+npm-debug.log*
+
+# Keep the vault folder tracked but ignore actual content if you don't
+# want your memories in git history. Comment this out if you DO want
+# git-versioned memory (recommended -- it's basically free undo history).
+# vault/*.md

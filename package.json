@@ -1,0 +1,20 @@
+{
+  "name": "mcp-memory-vault",
+  "version": "1.0.0",
+  "description": "A self-hosted, Obsidian-compatible markdown memory vault exposed as an MCP server, so any MCP-aware Claude account (or client) reads/writes the same persistent context.",
+  "type": "module",
+  "main": "src/http-server.js",
+  "scripts": {
+    "start:local": "node src/stdio-server.js",
+    "start:server": "node src/http-server.js",
+    "test:vault": "node src/test-vault.js"
+  },
+  "license": "ISC",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "express": "^5.2.1",
+    "fuse.js": "^7.4.2",
+    "gray-matter": "^4.0.3",
+    "zod": "^3.23.8"
+  }
+}
